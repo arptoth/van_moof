@@ -12,8 +12,16 @@ library(jsonlite)
 # Data import and cleaning ------------------------------------------------
 
 # Read US App Store reviews about Van Moof app
-reviews <- read_json("reviews_us.json")
+reviews_us <- read_json("reviews_us.json") %>% bind_rows()
+reviews_us
+
+reviews_gb <- read_json("reviews_gb.json") %>%  bind_rows()
+reviews_gb
+
+reviews_nl <- read_json("reviews_nl.json") %>%  bind_rows()
+reviews_nl
+
+reviews_en <- bind_rows(reviews_gb, reviews_us)
 
 
-# Translate to tibble
-reviews <-  bind_rows(reviews)
+

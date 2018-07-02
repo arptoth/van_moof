@@ -1,0 +1,348 @@
+---
+title: "Why people like Van Moof App in iTunes"
+author: "Text Analysis based on user reviews in App Store"
+output: 
+  html_document: 
+    code_folding: hide
+    df_print: kable
+    highlight: zenburn
+    theme: yeti
+---
+
+
+![](https://www.designboom.com/wp-content/uploads/2017/05/vanmoof-electrified-X-electric-bike-designboom-05-18-2017-fullheader2.jpg) 
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+```
+
+## Introduction
+
+ This report is a part of my job application for Open application at Van Moof. I am looking for a data analyst position and think could create real value for Van Moof. Open job description is here: <https://vanmoof.homerun.co/open-application/en>). 
+ 
+ 
+## What I did
+
+ 1. I scraped 60 app reviews from US, UK and NL App Store (by a simple node.js script)
+ 2. I did some exploratory data analysis
+ 3. I did sentiment analysis. What feelings and emotions are related to a review?
+ 4. I reviewed the reason about good and bad ratings
+ 4. I created a basic prediction for rating based on review texts
+ 5. Make recommendations on how to improve user satisfaction
+ 
+ 
+## Summary insights
+
+Based on text analysis I found the following information:
+
+ 1. People generally like Komoot app. The average rating is 4.2 in the US. However, comparing the review numbers in Germany the penetration in other counties could be improved
+ 2. Most of the unsatisfaction is related to battery usage and crashes.
+ 3. The most unrated versions are the 8.0 and 8.0.1, also 9.7.1 is less rated than the others in 9.x branch
+ 4. Mosty people love komoot because of the ability of planning and tracking features
+
+
+## Actionable insights
+
+Overall recommendations based on this super small dataset:
+
+ 1. Increase the penetration in other countries (like France, UK, Canada and the USA)
+ 2. Improve user experience 
+ 3. Improve battery usage
+ 4. Now iTunes supports response for feedbacks. Allocate resource to respond and evaluate latest feedbacks to turn them to action points
+
+
+Please review the rest of report for explanations.
+
+
+```{r importing, include=FALSE}
+library(tidyverse)
+library(ggplot2)
+library(tidytext)
+library(wordcloud)
+library(caret)
+library(glmnet)
+library(h2o)
+library(lime)
+library(jsonlite)
+```
+
+
+
+## Data import
+
+ The node.js script scraped the reviews in JSON format. It was fixed manually first. After that, I imported it by jsonlite library in R.
+
+```{r pressure}
+# Data import and cleaning ------------------------------------------------
+
+# Read US App Store reviews about Van Moof app
+reviews_us <- read_json("reviews_us.json") %>% bind_rows()
+reviews_us$country <- "US"
+reviews_us
+
+reviews_gb <- read_json("reviews_gb.json") %>%  bind_rows()
+reviews_gb$country <- "GB"
+reviews_gb
+
+reviews_nl <- read_json("reviews_nl.json") %>%  bind_rows()
+reviews_nl$country <- "NL"
+reviews_nl
+
+reviews_en <- bind_rows(reviews_gb, reviews_us)
+reviews <- bind_rows(reviews_en, reviews_nl)
+
+
+
+```
+
+
+## Let' explore the data
+
+ The iTunes shows different average ratings depends on the store. Let's check that by calculate mean of all score points. Based on the scraped data it is a bit less. English reviews mean is 2.9 while in Netherland it is 3.09.
+
+
+```{r}
+# Average ratings of Van Moof App in the App Store
+mean(reviews_en$score)
+mean(reviews_nl$score)
+
+```
+
+
+What are the distributions of the ratings?
+
+
+```{r, message=FALSE}
+# Distributions of ratings
+
+reviews %>% ggplot(aes(factor(score), fill = factor(country))) + geom_bar(stat = "count") + theme_minimal()
+
+reviews %>% ggplot(aes(factor(score), fill = factor(country))) + geom_bar(stat = "count", position=position_dodge()) + theme_minimal()
+
+```
+
+It seems most of the ratings are 5 stars. The second biggest number is the 1, the third is the 4 scores. We will dive into the deep in a later section what the most relevant reason by giving 5 or 1 star.
+ 
+Now let's check what is the distribution of comment numbers by app version.
+
+
+```{r message=FALSE, include=FALSE}
+version_counts <- reviews %>% select(version) %>% group_by(version) %>% summarise(Count=n()) %>% arrange(desc(Count))
+```
+```{r}
+version_counts %>% head()
+```
+
+
+Now, look at the average ratings by version. 
+
+Which was the best? 
+
+```{r}
+reviews %>% select(version, score) %>% group_by(version) %>% summarise(Mean=mean(score)) %>% arrange(desc(Mean))
+```
+
+Oops. It seems that those versions which get only 1 rating and got 5 are the best. This is not representative of course. The solution is to calculate the weighted mean (mean x number of reviews).
+
+```{r}
+reviews %>% select(version, score) %>% group_by(version) %>% summarise(Mean=mean(score), Count=n()) %>% mutate(weighted.mean=Mean*Count) %>%  arrange(desc(weighted.mean))
+```
+
+This table shows that 9.1.2 got the most reviews with the best ratings. The worst version was the 8.0 which got 9 reviews with 1.66 ratings on average.
+
+
+## What is the reason why people like komoot?
+
+To get the most relevant information let's review the word frequencies in 5-star reviews. The most frequent words in best ratings are:
+
+
+```{r message=FALSE, warning=FALSE}
+reviews %>% 
+  select(score, text) %>% 
+  filter(score==5) %>% 
+  tidytext::unnest_tokens(word, text, token = "words") %>% 
+  anti_join(get_stopwords()) %>% 
+  count(word, sort=T) %>% 
+  with(wordcloud(word, n, max.words = 50))
+```
+
+
+There are a lot of positive words like "easy", "great", "love" etc. In the next section, we will connect sentiments to the reviews to understand how users feel. Until then check the words frequency in 1-star reviews.
+
+```{r message=FALSE, warning=FALSE}
+reviews %>% 
+  select(score, text) %>% 
+  filter(score==1) %>% 
+  tidytext::unnest_tokens(word, text, token = "words") %>% 
+  anti_join(get_stopwords()) %>% 
+  count(word, sort=T) %>% 
+  with(wordcloud(word, n, max.words = 50))
+```
+
+The positive words are disappeared, but it does not help us to understand what is the biggest problem with the app. To see the issues we need to dive into the sentiment analysis.
+
+
+## Sentiment analysis
+
+Sentiment analysis is opinion mining (sometimes known as emotion AI) related to natural language processing. The goal is to identify, extract, quantify, and study affective states and subjective information.
+
+Let's review the relevant feelings in all of the text reviews. Here I count the most frequent words.
+
+```{r}
+word_data <- reviews %>% 
+  select(userName, text) %>% 
+  tidytext::unnest_tokens(word, text, token = "words")
+
+# Get nrc sentiment lexicon
+nrc <- get_sentiments("nrc")
+sentiments <- word_data %>% inner_join(nrc) %>% left_join(y=reviews[,c("userName", "score")])
+
+
+# Which words are relevant to specific sentiments
+sentiments %>%
+  # Count by word and sentiment
+  count(word, sentiment) %>%
+  # Group by sentiment
+  group_by(sentiment) %>%
+  # Take the top 10 words for each sentiment
+  top_n(10) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  # Set up the plot with aes()
+  ggplot(aes(word, n, fill=sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~ sentiment, scales = "free") +
+  coord_flip()
+```
+
+
+Let's review the negative sentiments: anger, disgust, fear, negative, sadness. 
+
+The biggest negative words are related to "battery" and "die". Let's filter the review texts include these words.
+
+```{r}
+reviews %>% 
+  select(text) %>% 
+  filter(grepl("battery", text) | grepl("die", text) )
+```
+
+
+The first reviews say the battery usage not efficient, however, the fourth says "Uses less battery life than google maps and works great". The last 3 is written in German and filtered out because of German article "die" not the English "die" :)
+
+
+Let's check the most positive and frequent word "love" in review texts.
+
+```{r}
+reviews %>% 
+  select(text) %>% 
+  filter(grepl("love", text))
+```
+
+People generally love the app because:
+
+* Ability of planning and tracking routes
+* Displaying suggestions and showing elevation
+* Tagging others
+* Sharing features
+
+Note that these reviews are not purely positive. Some of them contain recommendations for user experience and trip planning too.
+
+
+
+## Machine learning demo: Predicting ratings by review text
+
+Let's try to predict ratings based on texts.
+
+First I had to create a sparse matrix to represents word counts by users. Let's review how it looks like. This is an excerpt which includes only 3 words: fun, bike and app. The userName and score columns are from the original table.
+
+```{r}
+sparse_matrix <- reviews %>% 
+  select(userName, text) %>% 
+  tidytext::unnest_tokens(word, text, token = "words") %>% 
+  anti_join(get_stopwords()) %>%
+  count(userName, word, sort = TRUE) %>% 
+  cast_sparse(userName, word, n)
+
+sparse_matrix <- as.data.frame(as.matrix(sparse_matrix))
+
+sparse_matrix$userName <- rownames(sparse_matrix)
+
+train_df <- left_join(x=sparse_matrix, y=reviews[,c("userName", "score")])
+
+train_df %>% select(userName, score, fun, bike, app) %>% as_tibble()
+
+```
+
+
+Using H2O I tried the first Gradient Boosting Machine because we approximate a 1-5 scale. It could be also a multiclass classification. After that, by checking AutoML I found the best algorithm which is the Extreme Randomized Tree. I divided the dataset to train and test (75% - 25%). Check out the prediction results with XRT algorithm.
+
+```{r include=FALSE}
+# Set seed because of reproducability
+n_seed = 12345
+
+# Create target and feature list
+target = "score" # Result
+features = setdiff(colnames(train_df), c("target", "userName"))
+
+
+# Start a local H2O cluster (JVM)
+h2o.init()
+
+# H2O dataframe
+h_data <-  as.h2o(train_df)
+
+
+# Split Train/Test
+h_split = h2o.splitFrame(h_data, ratios = 0.75, seed = n_seed)
+h_train = h_split[[1]] # 75% for modelling
+h_test = h_split[[2]] # 25% for evaluation
+
+
+
+
+model_automl <- h2o.automl(x = features,
+                           y = target,
+                           training_frame = h_train,
+                           nfolds = 5,               # Cross-Validation
+                           max_runtime_secs = 30,   # Max time
+                           max_models = 100,         # Max no. of models
+                           stopping_metric = "RMSE", # Metric to optimize
+                           project_name = "my_automl",
+                           exclude_algos = NULL,     # If you want to exclude any algo 
+                           seed = n_seed)
+
+```
+
+
+```{r}
+
+h2o.performance(model_automl@leader, newdata = h_test)
+h2o.no_progress()
+new <- NULL
+new$pred <- as.vector(h2o.predict(model_automl@leader, newdata = h_test))
+new$actual <- as_data_frame(h_test)$score
+
+as_data_frame(new) %>% head(n=20)
+```
+
+The Root Mean Squared Error is around 1. That means the average distance between the prediction and the actual value is 1. 
+
+After reviewing the results I found that the values are overpredicted because the values are imbalanced by rating 5. 
+
+
+## Future improvements in this text analysis
+
+ 1. Review more sentiment related texts to understand more deeply user satisfaction/unsatisfaction
+ 2. Involve other English reviews to extend the data set
+ 3. Analyze german reviews with german lexicons
+ 4. Balance the rating data to get the prediction
+ 
+ 
+## Final words
+
+Thank you to reading my report. If you have any question you can reach me at arpad.tot@gmail.com 
+Moreover, I would be very happy to have skype/hangout call to discuss the position.
+
+Thanks again,
+Arpad Toth

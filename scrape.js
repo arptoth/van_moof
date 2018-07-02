@@ -4,7 +4,7 @@ var store = require('app-store-scraper');
 for(var i = 0; i < 11;i++){
 store.reviews({
   appId: 'com.vanmoof.VanMoof',
-  country: 'gb',
+  country: 'nl',
   sort: store.sort.RECENT,
   page: i
 })
